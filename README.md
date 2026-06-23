@@ -147,14 +147,39 @@ DATABASE_URL=postgres://user:pass@your-prod-db:5432/indexer_db
 CONTRACT_ADDRESS=0x你在主网的地址
 ```
 
+### 合约部署（keystore 方式）
+
+本地开发可以自动部署。但**测试网和主网必须用 keystore 手动部署一次**，之后索引器连接已有合约即可。
+
+```bash
+# 1. 导入私钥到 keystore（一次性）
+cast wallet import deployer --keystore-dir ~/.foundry/keystores
+# 输入私钥 + 密码
+
+# 2. 部署合约
+./deploy.sh sepolia    # 部署到 Sepolia 测试网
+./deploy.sh mainnet    # 部署到主网
+./deploy.sh local      # 部署到本地 anvil
+
+# 输出：
+# Deployed to: 0xABCD1234...
+# ✅ 部署完成。把地址填入 .env 的 CONTRACT_ADDRESS
+```
+
+部署完合约后，索引器连接已有合约（不重新部署）：
+
+```ts
+const indexer = await PgIndexer.create(pool, {
+  rpcUrl: "https://sepolia.infura.io/v3/...",
+  contractAddress: "0xABCD1234...",  // deploy.sh 输出的地址
+  deployerPrivateKey: process.env.DEPLOYER_PRIVATE_KEY,
+  launchAnvil: false,  // 连接外部 RPC，不启动本地链
+});
+```
+
 ### 去 Sepolia / 主网前的准备
 
-代码不用改，但需要：
-
-1. **部署合约到目标网络**
-   ```bash
-   forge create --rpc-url $RPC_URL --private-key $PK src/SimpleToken.sol:SimpleToken
-   ```
+1. **用 keystore 部署合约**（上方 deploy.sh）
 2. **确认索引器已连上**（你的团队后端 / Subgraph 在往 PG 写数据）
 3. **改 `.env` 三个变量**，对账脚本直接用
 

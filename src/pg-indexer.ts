@@ -14,9 +14,22 @@
 //   PgIndexer     → PostgreSQL 真数据，生产环境用 ← 这就是你问的「真实情况」
 //
 // 用法：
+//
+//   # 步骤 1：用 keystore 部署合约（一次性）
+//   forge create --rpc-url $RPC_URL \
+//     --keystore ~/.foundry/keystores/deployer \
+//     --password "$KEYSTORE_PASSWORD" \
+//     src/SimpleToken.sol:SimpleToken
+//   # → 输出：Deployed to: 0xCONTRACT_ADDRESS
+//
+//   # 步骤 2：启动索引器（连接已有合约）
 //   const pool = new Pool({ connectionString: "postgres://..." });
-//   const indexer = await PgIndexer.create(pool, { rpcUrl, pollingMs: 500 });
-//   const token = indexer.token;
+//   const indexer = await PgIndexer.create(pool, {
+//     rpcUrl: "https://sepolia.infura.io/v3/...",
+//     contractAddress: "0xCONTRACT_ADDRESS",  // 上一个命令输出的地址
+//     deployerPrivateKey: process.env.PRIVATE_KEY,
+//     launchAnvil: false,  // 不启动本地链，连外部 RPC
+//   });
 //
 //   const txHash = await indexer.transfer(alice, bob, 100e18);
 //
@@ -110,6 +123,15 @@ export interface PgIndexerOptions {
   pollingIntervalMs: number;
   launchAnvil: boolean;
   anvilPort: number;
+  /**
+   * 已部署的合约地址。
+   * 如果提供，则直接连接该合约（不重新部署）。
+   * 这是生产/测试网的推荐方式：先用 forge create --keystore 部署一次，
+   * 然后把地址传给索引器。
+   */
+  contractAddress?: Address;
+  /** 部署者私钥（仅本地 dev 自动部署时使用，生产环境合约已提前部署好，不需要） */
+  deployerPrivateKey?: `0x${string}`;
 }
 
 export class PgIndexer extends EventEmitter {
@@ -144,8 +166,14 @@ export class PgIndexer extends EventEmitter {
   }
 
   /**
-   * 工厂：初始化 PostgreSQL 表 → 启动 anvil（可选）
-   * → 部署 SimpleToken → 开始轮询链上事件写入 PG。
+   * 工厂：初始化 PostgreSQL 表 → 连接链 RPC → 连接合约（已有或新部署）
+   * → 开始轮询链上事件写入 PG。
+   *
+   * 生产/测试网用法（合约已提前用 forge create --keystore 部署）：
+   *   PgIndexer.create(pool, { rpcUrl, contractAddress: "0x...", launchAnvil: false })
+   *
+   * 本地开发用法（自动启动 anvil + 自动部署）：
+   *   PgIndexer.create(pool, { launchAnvil: true })
    */
   static async create(
     pool: Pool,
@@ -171,17 +199,30 @@ export class PgIndexer extends EventEmitter {
     }
 
     const publicClient = createPublicClient({ transport: http(rpcUrl) });
-    const deployerAddress =
-      "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" as Address;
+
+    // 部署者账户：优先用传入的私钥，否则用 anvil 默认账户
+    const deployerPrivateKey =
+      options.deployerPrivateKey ??
+      "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"; // anvil 默认私钥
 
     const walletClient = createWalletClient({
-      account: deployerAddress,
+      account: deployerPrivateKey,
       transport: http(rpcUrl),
     });
 
-    // 2. 部署合约
-    const token = await deploySimpleToken(publicClient, walletClient);
-    console.log(`[PgIndexer] SimpleToken 已部署：${token.address}`);
+    // 2. 连接合约：如果传入了已部署的地址则直接用，否则自动部署
+    let token: DeployedToken;
+    if (options.contractAddress) {
+      token = {
+        address: options.contractAddress,
+        owner: walletClient.account?.address ??
+          ("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" as Address),
+      };
+      console.log(`[PgIndexer] 连接已有合约：${token.address}`);
+    } else {
+      token = await deploySimpleToken(publicClient, walletClient);
+      console.log(`[PgIndexer] SimpleToken 已部署：${token.address}`);
+    }
 
     const indexer = new PgIndexer(
       pool,
